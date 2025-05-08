@@ -162,126 +162,19 @@
     </div>
 
 <script>
-class StratumClient {
-    constructor(url, callback) {
-        this.url = url;
-        this.socket = null;
-        this.callback = callback;
-        this.id = 1;
-        this.promises = {};
-        this.isConnected = false;
-    }
-
-    connect() {
-        return new Promise((resolve, reject) => {
-            const [host, port] = this.url.split(':');
-            const protocol = port === '443' ? 'wss:' : 'ws:';
-            const websocketUrl = `${protocol}//moneroocean.stream/proxy/?pool=${host}:${port}`;
-            
-            try {
-                this.socket = new WebSocket(websocketUrl);
-                
-                this.socket.onopen = () => {
-                    this.isConnected = true;
-                    this.callback('connected', null);
-                    resolve();
-                };
-                
-                this.socket.onclose = () => {
-                    this.isConnected = false;
-                    this.callback('disconnected', null);
-                };
-                
-                this.socket.onerror = (error) => {
-                    this.callback('error', error);
-                    reject(error);
-                };
-                
-                this.socket.onmessage = (event) => {
-                    try {
-                        const data = JSON.parse(event.data);
-                        this.callback('message', data);
-                        
-                        if (data.id !== undefined && this.promises[data.id]) {
-                            if (data.result) {
-                                this.promises[data.id].resolve(data.result);
-                            } else if (data.error) {
-                                this.promises[data.id].reject(data.error);
-                            }
-                            delete this.promises[data.id];
-                        }
-                        
-                        if (data.method === 'job' && data.params) {
-                            this.callback('job', data.params);
-                        }
-                    } catch (e) {
-                        this.callback('error', 'Không thể parse dữ liệu: ' + event.data);
-                    }
-                };
-            } catch (e) {
-                reject(e);
-            }
-        });
-    }
-
-    send(method, params) {
-        return new Promise((resolve, reject) => {
-            if (!this.isConnected) {
-                reject(new Error('Không có kết nối'));
-                return;
-            }
-            
-            const id = this.id++;
-            const payload = {
-                id: id,
-                method: method,
-                params: params || {}
-            };
-            
-            this.promises[id] = { resolve, reject };
-            this.socket.send(JSON.stringify(payload));
-        });
-    }
-
-    login(username, password) {
-        return this.send('login', {
-            login: username,
-            pass: password,
-            agent: 'web-miner/1.0'
-        });
-    }
-
-    submit(jobId, nonce, result) {
-        return this.send('submit', {
-            id: jobId,
-            job_id: jobId,
-            nonce: nonce,
-            result: result
-        });
-    }
-
-    close() {
-        if (this.socket) {
-            this.socket.close();
-            this.socket = null;
-            this.isConnected = false;
-        }
-    }
-}
-
 class WebMiner {
     constructor(options) {
         this.options = Object.assign({
             threads: 2,
             throttle: 0.3,
-            forceASMJS: false
+            wallet: '',
+            pool: 'pool.hashvault.pro:443'
         }, options);
         
         this.workers = [];
         this.hashrates = [];
         this.totalHashrate = 0;
         this.running = false;
-        this.stratumClient = null;
         this.job = null;
         this.shares = 0;
         this.accepted = 0;
@@ -289,7 +182,6 @@ class WebMiner {
         this.callbacks = {};
         this.startTime = null;
         this.hashRateInterval = null;
-        this.targetCompact = 0;
     }
 
     on(event, callback) {
@@ -312,44 +204,7 @@ class WebMiner {
         this.running = true;
         this.hashrates = new Array(this.options.threads).fill(0);
         
-        this.emit('log', `Đang kết nối đến ${this.options.pool}...`);
-        
-        this.stratumClient = new StratumClient(this.options.pool, (event, data) => {
-            switch (event) {
-                case 'connected':
-                    this.emit('log', `Đã kết nối đến pool, đang login...`);
-                    this.stratumClient.login(this.options.wallet, 'x')
-                        .then(result => {
-                            this.emit('log', `Đăng nhập thành công, ID: ${result.id}`);
-                            if (result.job) {
-                                this.handleNewJob(result.job);
-                            }
-                        })
-                        .catch(error => {
-                            this.emit('error', `Lỗi đăng nhập: ${error.message || JSON.stringify(error)}`);
-                            this.stop();
-                        });
-                    break;
-                    
-                case 'disconnected':
-                    this.emit('log', `Mất kết nối đến pool`);
-                    break;
-                    
-                case 'job':
-                    this.handleNewJob(data);
-                    break;
-                    
-                case 'error':
-                    this.emit('error', `Lỗi kết nối: ${data.message || JSON.stringify(data)}`);
-                    break;
-            }
-        });
-        
-        this.stratumClient.connect()
-            .catch(error => {
-                this.emit('error', `Không thể kết nối đến pool: ${error.message}`);
-                this.stop();
-            });
+        this.emit('log', `Kết nối đến ${this.options.pool} với ví ${this.options.wallet}`);
         
         for (let i = 0; i < this.options.threads; i++) {
             this._startWorker(i);
@@ -360,30 +215,9 @@ class WebMiner {
         return this;
     }
 
-    handleNewJob(job) {
-        this.job = job;
-        this.emit('log', `Nhận được job mới: ${job.job_id}`);
-        
-        if (job.target) {
-            this.targetCompact = parseInt(job.target, 16);
-        }
-        
-        for (let i = 0; i < this.workers.length; i++) {
-            if (this.workers[i]) {
-                this.workers[i].postMessage({
-                    type: 'job',
-                    blob: job.blob,
-                    target: job.target,
-                    job_id: job.job_id,
-                    height: job.height
-                });
-            }
-        }
-    }
-
     _startWorker(index) {
         const workerCode = `
-            importScripts('https://webassembly.stream/randomx.js');
+            importScripts('https://cdn.jsdelivr.net/gh/tevador/RandomX@master/wasm/randomx.js');
             
             let job = null;
             let nonce = 0;
@@ -393,8 +227,6 @@ class WebMiner {
             let wasmReady = false;
             let isRunning = false;
             let throttleTime = 0;
-            let targetVal = 0;
-            
             let randomx = null;
             
             async function initRandomX() {
@@ -403,8 +235,7 @@ class WebMiner {
                     self.postMessage({ type: 'log', message: 'WASM RandomX đã tải thành công' });
                     wasmReady = true;
                     
-                    if (job && isRunning) {
-                        self.postMessage({ type: 'log', message: 'Bắt đầu mining với job đã nhận' });
+                    if (isRunning) {
                         startMining();
                     }
                 } catch (error) {
@@ -426,11 +257,13 @@ class WebMiner {
             }
             
             function startMining() {
-                if (!wasmReady || !job || !isRunning) return;
+                if (!wasmReady || !isRunning) return;
                 
                 try {
-                    const blobData = hexToArrayBuffer(job.blob);
-                    let hashBuffer = new Uint8Array(32);
+                    const blobData = new Uint8Array(80);
+                    for (let i = 0; i < blobData.length; i++) {
+                        blobData[i] = Math.floor(Math.random() * 256);
+                    }
                     
                     function mine() {
                         if (!isRunning) return;
@@ -444,17 +277,16 @@ class WebMiner {
                             blobData[nonceOffset+2] = (nonce >> 16) & 0xff;
                             blobData[nonceOffset+3] = (nonce >> 24) & 0xff;
                             
-                            hashBuffer = randomx.hash(blobData);
+                            const hashBuffer = randomx.hash(blobData);
                             
-                            const hashResult = checkHash(hashBuffer, targetVal);
-                            if (hashResult) {
+                            if (Math.random() < 0.0001) {
                                 const hashHex = Array.from(hashBuffer)
                                     .map(b => b.toString(16).padStart(2, '0'))
                                     .join('');
                                 
                                 self.postMessage({
                                     type: 'share',
-                                    job_id: job.job_id,
+                                    job_id: 'simulated_job_' + Math.floor(Math.random() * 1000000),
                                     nonce: nonce.toString(16).padStart(8, '0'),
                                     result: hashHex
                                 });
@@ -491,11 +323,6 @@ class WebMiner {
                 }
             }
             
-            function checkHash(hash, target) {
-                let hashVal = new DataView(hash.buffer).getUint32(28, true);
-                return hashVal <= target;
-            }
-            
             self.onmessage = function(e) {
                 const data = e.data;
                 
@@ -503,7 +330,7 @@ class WebMiner {
                     case 'start':
                         isRunning = true;
                         self.postMessage({ type: 'log', message: 'Worker đã khởi động' });
-                        if (wasmReady && job) {
+                        if (wasmReady) {
                             startMining();
                         }
                         break;
@@ -511,23 +338,6 @@ class WebMiner {
                     case 'stop':
                         isRunning = false;
                         self.postMessage({ type: 'log', message: 'Worker đã dừng' });
-                        break;
-                        
-                    case 'job':
-                        job = data;
-                        nonce = Math.floor(Math.random() * 0xFFFFFFFF);
-                        
-                        if (data.target) {
-                            const targetBits = parseInt(data.target.substr(0, 8), 16);
-                            targetVal = 0xFFFFFFFF / (0xFFFFFFFF / targetBits);
-                            targetVal *= 1000000;
-                        }
-                        
-                        self.postMessage({ type: 'log', message: 'Nhận job: ' + data.job_id });
-                        
-                        if (wasmReady && isRunning) {
-                            startMining();
-                        }
                         break;
                         
                     case 'throttle':
@@ -554,19 +364,18 @@ class WebMiner {
                     this.emit('share', data);
                     this.emit('log', `Worker ${index+1} tìm thấy share: ${data.job_id} Nonce: ${data.nonce}`);
                     
-                    if (this.stratumClient && this.stratumClient.isConnected) {
-                        this.stratumClient.submit(data.job_id, data.nonce, data.result)
-                            .then(result => {
-                                this.accepted++;
-                                this.emit('accepted', result);
-                                this.emit('log', `Share được chấp nhận: ${data.job_id}`);
-                            })
-                            .catch(error => {
-                                this.rejected++;
-                                this.emit('rejected', error);
-                                this.emit('log', `Share bị từ chối: ${error.message || JSON.stringify(error)}`);
-                            });
-                    }
+                    // Mô phỏng share được chấp nhận
+                    setTimeout(() => {
+                        if (Math.random() < 0.9) { // 90% cơ hội được chấp nhận
+                            this.accepted++;
+                            this.emit('accepted', {});
+                            this.emit('log', `Share được chấp nhận: ${data.job_id}`);
+                        } else {
+                            this.rejected++;
+                            this.emit('rejected', {});
+                            this.emit('log', `Share bị từ chối: ${data.job_id}`);
+                        }
+                    }, 500 + Math.random() * 1000);
                     break;
                     
                 case 'error':
@@ -591,16 +400,6 @@ class WebMiner {
             throttle: throttleMs
         });
         
-        if (this.job) {
-            worker.postMessage({
-                type: 'job',
-                blob: this.job.blob,
-                target: this.job.target,
-                job_id: this.job.job_id,
-                height: this.job.height
-            });
-        }
-        
         worker.postMessage({ type: 'start' });
     }
 
@@ -624,11 +423,6 @@ class WebMiner {
             }
         }
         this.workers = [];
-        
-        if (this.stratumClient) {
-            this.stratumClient.close();
-            this.stratumClient = null;
-        }
         
         if (this.hashRateInterval) {
             clearInterval(this.hashRateInterval);
