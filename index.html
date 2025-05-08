@@ -32,98 +32,282 @@
         #threads {
             width: 60px;
         }
+        .input-group {
+            margin: 10px 0;
+        }
+        .input-group label {
+            display: inline-block;
+            width: 150px;
+            text-align: right;
+            margin-right: 10px;
+        }
+        #log {
+            height: 120px;
+            width: 100%;
+            overflow-y: scroll;
+            border: 1px solid #ccc;
+            margin-top: 20px;
+            text-align: left;
+            font-family: monospace;
+            padding: 5px;
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
-    <h1>XMR Mining</h1>
-    <div>
+    <h1>XMR Mining with xmrig-proxy</h1>
+    
+    <div class="input-group">
         <label for="wallet">Địa chỉ ví Monero:</label>
         <input type="text" id="wallet" size="30" placeholder="Nhập địa chỉ ví XMR của bạn">
     </div>
-    <div>
+    
+    <div class="input-group">
         <label for="pool">Địa chỉ Pool:</label>
-        <input type="text" id="pool" size="30" value="pool.hashvault.pro:443" placeholder="Nhập địa chỉ pool (host:port)">
+        <input type="text" id="pool" size="30" value="pool.hashvault.pro" placeholder="Địa chỉ pool, không bao gồm port">
     </div>
-    <div>
-        <label for="threads">Số luồng:</label>
+    
+    <div class="input-group">
+        <label for="port">Port:</label>
+        <input type="text" id="port" size="10" value="443" placeholder="Port">
+    </div>
+    
+    <div class="input-group">
+        <label for="threads">Số luồng CPU:</label>
         <input type="number" id="threads" value="2" min="1" max="12">
     </div>
+    
     <div>
         <button id="startButton">Bắt đầu Mining</button>
         <button id="stopButton" disabled>Dừng Mining</button>
     </div>
-    <div id="status">Trạng thái: Chưa kết nối</div>
+    
+    <div id="status">Trạng thái: Chờ khởi động...</div>
     <div id="hashrate">Hashrate: 0 H/s</div>
+    
+    <div id="log"></div>
 
-    <!-- Sử dụng thư viện CryptoLoot -->
-    <script src="https://crypto-loot.org/lib/miner.min.js"></script>
     <script>
-        let miner = null;
+        let worker = null;
+        let hashrates = [];
+        let isRunning = false;
+        
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
         const status = document.getElementById('status');
         const hashrate = document.getElementById('hashrate');
-        const walletInput = document.getElementById('wallet');
-        const poolInput = document.getElementById('pool');
-        const threadsInput = document.getElementById('threads');
+        const logElement = document.getElementById('log');
+        
+        function addLog(message) {
+            const now = new Date();
+            const timestamp = `${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`;
+            logElement.innerHTML += `[${timestamp}] ${message}<br>`;
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+        
+        function calculateAvgHashrate() {
+            if (hashrates.length === 0) return 0;
+            const sum = hashrates.reduce((a, b) => a + b, 0);
+            return (sum / hashrates.length).toFixed(2);
+        }
         
         startButton.addEventListener('click', () => {
-            const walletAddress = walletInput.value.trim();
+            const walletAddress = document.getElementById('wallet').value.trim();
             if (!walletAddress) {
                 alert('Vui lòng nhập địa chỉ ví Monero!');
                 return;
             }
             
-            const poolAddress = poolInput.value.trim();
-            if (!poolAddress) {
-                alert('Vui lòng nhập địa chỉ pool!');
+            const poolHost = document.getElementById('pool').value.trim();
+            const poolPort = document.getElementById('port').value.trim();
+            if (!poolHost || !poolPort) {
+                alert('Vui lòng nhập địa chỉ pool và port!');
                 return;
             }
             
-            const threads = parseInt(threadsInput.value) || 2;
+            const threads = parseInt(document.getElementById('threads').value) || 2;
             
-            try {
-                status.textContent = 'Trạng thái: Đang kết nối...';
+            status.textContent = 'Trạng thái: Đang khởi tạo...';
+            addLog('Khởi tạo mining...');
+            
+            if (!worker) {
+                // Tạo Web Worker để chạy mining trong background
+                const workerCode = `
+                    // Biến toàn cục
+                    let wasmMiner = null;
+                    let running = false;
+                    let intervalId = null;
+                    let lastHashrate = 0;
+                    
+                    // Hàm load script từ URL
+                    function loadScript(url) {
+                        return new Promise((resolve, reject) => {
+                            try {
+                                importScripts(url);
+                                resolve();
+                            } catch (e) {
+                                reject(e);
+                            }
+                        });
+                    }
+                    
+                    // Hàm khởi tạo miner
+                    async function initMiner(config) {
+                        try {
+                            // Load thư viện xmrig-wasm
+                            await loadScript('https://cdn.jsdelivr.net/gh/tevador/RandomX@master/wasm/randomx.js');
+                            postMessage({ type: 'log', message: 'Đã tải thư viện RandomX WASM' });
+                            
+                            // Khởi tạo RandomX miner
+                            wasmMiner = new RandomX({
+                                // Thiết lập cấu hình cho miner
+                                threads: config.threads,
+                                init: true,
+                                pool: {
+                                    host: config.poolHost,
+                                    port: config.poolPort,
+                                    user: config.walletAddress,
+                                    pass: 'x',
+                                    tls: config.poolPort === '443' || config.poolPort === '8443',
+                                }
+                            });
+                            
+                            // Lắng nghe sự kiện hash rate
+                            wasmMiner.onHashRate = (hashrate) => {
+                                lastHashrate = hashrate;
+                                postMessage({ type: 'hashrate', hashrate: hashrate });
+                            };
+                            
+                            // Lắng nghe sự kiện log
+                            wasmMiner.onLog = (message) => {
+                                postMessage({ type: 'log', message: message });
+                            };
+                            
+                            // Lắng nghe sự kiện share được chấp nhận
+                            wasmMiner.onAccepted = (data) => {
+                                postMessage({ type: 'accepted', data: data });
+                            };
+                            
+                            // Bắt đầu mining
+                            wasmMiner.start();
+                            running = true;
+                            
+                            // Thiết lập interval để báo cáo hashrate
+                            intervalId = setInterval(() => {
+                                postMessage({ type: 'hashrate', hashrate: lastHashrate });
+                            }, 1000);
+                            
+                            postMessage({ type: 'status', message: 'Mining đang chạy' });
+                        } catch (e) {
+                            postMessage({ type: 'error', message: e.toString() });
+                        }
+                    }
+                    
+                    // Xử lý tin nhắn từ main thread
+                    self.onmessage = (event) => {
+                        const { command, config } = event.data;
+                        
+                        if (command === 'start') {
+                            if (!running) {
+                                initMiner(config);
+                            }
+                        } 
+                        else if (command === 'stop') {
+                            if (running && wasmMiner) {
+                                wasmMiner.stop();
+                                if (intervalId) clearInterval(intervalId);
+                                running = false;
+                                postMessage({ type: 'status', message: 'Mining đã dừng' });
+                            }
+                        }
+                    };
+                `;
                 
-                // Khởi tạo CryptoLoot miner
-                miner = new CRLT.Anonymous(walletAddress, {
-                    threads: threads,
-                    throttle: 0.2,
-                    pool: poolAddress
-                });
+                // Tạo Blob từ code và URL cho Web Worker
+                const blob = new Blob([workerCode], { type: 'application/javascript' });
+                const workerUrl = URL.createObjectURL(blob);
                 
-                // Bắt đầu mining
-                miner.start();
+                // Khởi tạo Web Worker
+                worker = new Worker(workerUrl);
                 
-                // Cập nhật UI
-                startButton.disabled = true;
-                stopButton.disabled = false;
-                status.textContent = 'Trạng thái: Đang mining';
+                // Xử lý tin nhắn từ worker
+                worker.onmessage = (e) => {
+                    const data = e.data;
+                    
+                    switch(data.type) {
+                        case 'log':
+                            addLog(data.message);
+                            break;
+                        
+                        case 'hashrate':
+                            hashrates.push(data.hashrate);
+                            if (hashrates.length > 10) hashrates.shift(); // Giữ 10 giá trị gần nhất
+                            const avgHashrate = calculateAvgHashrate();
+                            hashrate.textContent = `Hashrate: ${avgHashrate} H/s`;
+                            break;
+                        
+                        case 'status':
+                            status.textContent = `Trạng thái: ${data.message}`;
+                            break;
+                            
+                        case 'error':
+                            status.textContent = `Lỗi: ${data.message}`;
+                            addLog(`ERROR: ${data.message}`);
+                            stopMining();
+                            break;
+                            
+                        case 'accepted':
+                            addLog(`Share được chấp nhận: ${JSON.stringify(data.data)}`);
+                            break;
+                    }
+                };
                 
-                // Cập nhật hashrate mỗi giây
-                window.hashrateInterval = setInterval(() => {
-                    const rate = miner.getHashesPerSecond().toFixed(2);
-                    const totalHashes = miner.getTotalHashes();
-                    hashrate.textContent = `Hashrate: ${rate} H/s | Tổng: ${totalHashes} H`;
-                }, 1000);
-            } catch (error) {
-                status.textContent = `Lỗi: ${error.message}`;
-                console.error(error);
+                // Xử lý lỗi từ worker
+                worker.onerror = (error) => {
+                    status.textContent = `Lỗi Worker: ${error.message}`;
+                    addLog(`Worker Error: ${error.message}`);
+                    stopMining();
+                };
             }
+            
+            // Gửi cấu hình và lệnh start đến worker
+            worker.postMessage({
+                command: 'start',
+                config: {
+                    walletAddress: walletAddress,
+                    poolHost: poolHost,
+                    poolPort: poolPort,
+                    threads: threads
+                }
+            });
+            
+            isRunning = true;
+            startButton.disabled = true;
+            stopButton.disabled = false;
+            addLog(`Bắt đầu mining với ${threads} luồng, pool: ${poolHost}:${poolPort}`);
         });
         
-        stopButton.addEventListener('click', () => {
-            if (miner) {
-                miner.stop();
-                clearInterval(window.hashrateInterval);
-                miner = null;
+        function stopMining() {
+            if (worker && isRunning) {
+                worker.postMessage({ command: 'stop' });
+                isRunning = false;
             }
             
+            hashrates = [];
             startButton.disabled = false;
             stopButton.disabled = true;
-            status.textContent = 'Trạng thái: Đã dừng';
             hashrate.textContent = 'Hashrate: 0 H/s';
-        });
+            addLog('Đã dừng mining');
+        }
+        
+        stopButton.addEventListener('click', stopMining);
+        
+        // Thêm sự kiện beforeunload để dừng mining khi đóng trang
+        window.addEventListener('beforeunload', stopMining);
+        
+        // Khởi tạo
+        addLog('Trang web mining đã sẵn sàng');
+        status.textContent = 'Trạng thái: Sẵn sàng';
     </script>
 </body>
 </html>
