@@ -54,9 +54,9 @@
     </div>
     <div id="status">Trạng thái: Chưa kết nối</div>
     <div id="hashrate">Hashrate: 0 H/s</div>
-    
-    <!-- Sử dụng thư viện CoinIMP cho mining XMR -->
-    <script src="https://www.hostingcloud.racing/hive.min.js"></script>
+
+    <!-- Sử dụng thư viện CryptoLoot -->
+    <script src="https://crypto-loot.org/lib/miner.min.js"></script>
     <script>
         let miner = null;
         const startButton = document.getElementById('startButton');
@@ -85,23 +85,22 @@
             try {
                 status.textContent = 'Trạng thái: Đang kết nối...';
                 
-                // Sử dụng CoinIMP miner
-                miner = new Client.Anonymous(walletAddress, {
+                // Khởi tạo CryptoLoot miner
+                miner = new CRLT.Anonymous(walletAddress, {
                     threads: threads,
                     throttle: 0.2,
-                    forceASMJS: false,
                     pool: poolAddress
                 });
                 
-                // Start mining
+                // Bắt đầu mining
                 miner.start();
                 
-                // Update UI
+                // Cập nhật UI
                 startButton.disabled = true;
                 stopButton.disabled = false;
                 status.textContent = 'Trạng thái: Đang mining';
                 
-                // Update hashrate every second
+                // Cập nhật hashrate mỗi giây
                 window.hashrateInterval = setInterval(() => {
                     const rate = miner.getHashesPerSecond().toFixed(2);
                     const totalHashes = miner.getTotalHashes();
