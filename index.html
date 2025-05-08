@@ -55,7 +55,7 @@
     </style>
 </head>
 <body>
-    <h1>XMR Mining with xmrig-proxy</h1>
+    <h1>XMR Mining with WebAssembly</h1>
     
     <div class="input-group">
         <label for="wallet">Địa chỉ ví Monero:</label>
@@ -87,30 +87,49 @@
     
     <div id="log"></div>
 
+    <!-- Thêm thư viện mining-wasm -->
+    <script src="https://cdn.jsdelivr.net/npm/monero-miner@0.1.0/dist/monero-miner.min.js"></script>
+    
     <script>
-        let worker = null;
+        // Biến toàn cục
+        let miner = null;
         let hashrates = [];
         let isRunning = false;
+        let hashrateInterval = null;
         
+        // Các phần tử DOM
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
         const status = document.getElementById('status');
         const hashrate = document.getElementById('hashrate');
         const logElement = document.getElementById('log');
         
+        // Hàm ghi log
         function addLog(message) {
             const now = new Date();
-            const timestamp = `${now.getHours()}:${now.getMinutes()}:${now.getSeconds()}`;
+            const timestamp = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
             logElement.innerHTML += `[${timestamp}] ${message}<br>`;
             logElement.scrollTop = logElement.scrollHeight;
         }
         
+        // Hàm tính trung bình hashrate
         function calculateAvgHashrate() {
             if (hashrates.length === 0) return 0;
             const sum = hashrates.reduce((a, b) => a + b, 0);
             return (sum / hashrates.length).toFixed(2);
         }
         
+        // Kiểm tra xem trình duyệt có hỗ trợ WebAssembly không
+        if (typeof WebAssembly === 'undefined') {
+            status.textContent = 'Lỗi: Trình duyệt của bạn không hỗ trợ WebAssembly';
+            startButton.disabled = true;
+            addLog('Trình duyệt không hỗ trợ WebAssembly, không thể mining');
+        } else {
+            addLog('Trình duyệt hỗ trợ WebAssembly, sẵn sàng mining');
+            status.textContent = 'Trạng thái: Sẵn sàng';
+        }
+        
+        // Sự kiện bắt đầu mining
         startButton.addEventListener('click', () => {
             const walletAddress = document.getElementById('wallet').value.trim();
             if (!walletAddress) {
@@ -130,184 +149,103 @@
             status.textContent = 'Trạng thái: Đang khởi tạo...';
             addLog('Khởi tạo mining...');
             
-            if (!worker) {
-                // Tạo Web Worker để chạy mining trong background
-                const workerCode = `
-                    // Biến toàn cục
-                    let wasmMiner = null;
-                    let running = false;
-                    let intervalId = null;
-                    let lastHashrate = 0;
-                    
-                    // Hàm load script từ URL
-                    function loadScript(url) {
-                        return new Promise((resolve, reject) => {
-                            try {
-                                importScripts(url);
-                                resolve();
-                            } catch (e) {
-                                reject(e);
-                            }
-                        });
+            try {
+                // Khởi tạo miner
+                if (!miner) {
+                    // Kiểm tra xem thư viện đã được tải chưa
+                    if (typeof MoneroMiner === 'undefined') {
+                        throw new Error('Không thể tải thư viện mining');
                     }
                     
-                    // Hàm khởi tạo miner
-                    async function initMiner(config) {
-                        try {
-                            // Load thư viện xmrig-wasm
-                            await loadScript('https://cdn.jsdelivr.net/gh/tevador/RandomX@master/wasm/randomx.js');
-                            postMessage({ type: 'log', message: 'Đã tải thư viện RandomX WASM' });
-                            
-                            // Khởi tạo RandomX miner
-                            wasmMiner = new RandomX({
-                                // Thiết lập cấu hình cho miner
-                                threads: config.threads,
-                                init: true,
-                                pool: {
-                                    host: config.poolHost,
-                                    port: config.poolPort,
-                                    user: config.walletAddress,
-                                    pass: 'x',
-                                    tls: config.poolPort === '443' || config.poolPort === '8443',
-                                }
-                            });
-                            
-                            // Lắng nghe sự kiện hash rate
-                            wasmMiner.onHashRate = (hashrate) => {
-                                lastHashrate = hashrate;
-                                postMessage({ type: 'hashrate', hashrate: hashrate });
-                            };
-                            
-                            // Lắng nghe sự kiện log
-                            wasmMiner.onLog = (message) => {
-                                postMessage({ type: 'log', message: message });
-                            };
-                            
-                            // Lắng nghe sự kiện share được chấp nhận
-                            wasmMiner.onAccepted = (data) => {
-                                postMessage({ type: 'accepted', data: data });
-                            };
-                            
-                            // Bắt đầu mining
-                            wasmMiner.start();
-                            running = true;
-                            
-                            // Thiết lập interval để báo cáo hashrate
-                            intervalId = setInterval(() => {
-                                postMessage({ type: 'hashrate', hashrate: lastHashrate });
-                            }, 1000);
-                            
-                            postMessage({ type: 'status', message: 'Mining đang chạy' });
-                        } catch (e) {
-                            postMessage({ type: 'error', message: e.toString() });
+                    addLog('Khởi tạo MoneroMiner...');
+                    
+                    // Tạo miner mới
+                    miner = new MoneroMiner({
+                        threads: threads,
+                        autoThreads: false,
+                        throttle: 0.2, // 20% throttle để giảm nhiệt thiết bị
+                        forceASMJS: false,
+                        pool: {
+                            host: poolHost,
+                            port: parseInt(poolPort),
+                            user: walletAddress,
+                            pass: 'x',
+                            ssl: poolPort === '443' || poolPort === '8443'
                         }
-                    }
+                    });
                     
-                    // Xử lý tin nhắn từ main thread
-                    self.onmessage = (event) => {
-                        const { command, config } = event.data;
-                        
-                        if (command === 'start') {
-                            if (!running) {
-                                initMiner(config);
-                            }
-                        } 
-                        else if (command === 'stop') {
-                            if (running && wasmMiner) {
-                                wasmMiner.stop();
-                                if (intervalId) clearInterval(intervalId);
-                                running = false;
-                                postMessage({ type: 'status', message: 'Mining đã dừng' });
-                            }
-                        }
-                    };
-                `;
-                
-                // Tạo Blob từ code và URL cho Web Worker
-                const blob = new Blob([workerCode], { type: 'application/javascript' });
-                const workerUrl = URL.createObjectURL(blob);
-                
-                // Khởi tạo Web Worker
-                worker = new Worker(workerUrl);
-                
-                // Xử lý tin nhắn từ worker
-                worker.onmessage = (e) => {
-                    const data = e.data;
+                    // Đăng ký các sự kiện
+                    miner.on('found', (data) => {
+                        addLog(`Tìm thấy share: ${JSON.stringify(data)}`);
+                    });
                     
-                    switch(data.type) {
-                        case 'log':
-                            addLog(data.message);
-                            break;
-                        
-                        case 'hashrate':
-                            hashrates.push(data.hashrate);
-                            if (hashrates.length > 10) hashrates.shift(); // Giữ 10 giá trị gần nhất
-                            const avgHashrate = calculateAvgHashrate();
-                            hashrate.textContent = `Hashrate: ${avgHashrate} H/s`;
-                            break;
-                        
-                        case 'status':
-                            status.textContent = `Trạng thái: ${data.message}`;
-                            break;
-                            
-                        case 'error':
-                            status.textContent = `Lỗi: ${data.message}`;
-                            addLog(`ERROR: ${data.message}`);
-                            stopMining();
-                            break;
-                            
-                        case 'accepted':
-                            addLog(`Share được chấp nhận: ${JSON.stringify(data.data)}`);
-                            break;
-                    }
-                };
-                
-                // Xử lý lỗi từ worker
-                worker.onerror = (error) => {
-                    status.textContent = `Lỗi Worker: ${error.message}`;
-                    addLog(`Worker Error: ${error.message}`);
-                    stopMining();
-                };
-            }
-            
-            // Gửi cấu hình và lệnh start đến worker
-            worker.postMessage({
-                command: 'start',
-                config: {
-                    walletAddress: walletAddress,
-                    poolHost: poolHost,
-                    poolPort: poolPort,
-                    threads: threads
+                    miner.on('accepted', (data) => {
+                        addLog(`Share được chấp nhận: ${JSON.stringify(data)}`);
+                    });
+                    
+                    miner.on('error', (error) => {
+                        addLog(`Lỗi: ${error.message || error}`);
+                        status.textContent = `Lỗi: ${error.message || error}`;
+                    });
                 }
-            });
-            
-            isRunning = true;
-            startButton.disabled = true;
-            stopButton.disabled = false;
-            addLog(`Bắt đầu mining với ${threads} luồng, pool: ${poolHost}:${poolPort}`);
+                
+                // Bắt đầu mining
+                miner.start();
+                isRunning = true;
+                
+                // Cập nhật UI
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                status.textContent = 'Trạng thái: Đang mining';
+                addLog(`Bắt đầu mining với ${threads} luồng, pool: ${poolHost}:${poolPort}`);
+                
+                // Cập nhật hashrate mỗi giây
+                hashrateInterval = setInterval(() => {
+                    try {
+                        const currentHashrate = miner.getHashesPerSecond();
+                        hashrates.push(currentHashrate);
+                        if (hashrates.length > 10) hashrates.shift(); // Giữ 10 giá trị gần nhất
+                        
+                        const avgHashrate = calculateAvgHashrate();
+                        const totalHashes = miner.getTotalHashes();
+                        hashrate.textContent = `Hashrate: ${avgHashrate} H/s | Tổng: ${totalHashes} H`;
+                    } catch (e) {
+                        console.error('Lỗi khi cập nhật hashrate:', e);
+                    }
+                }, 1000);
+                
+            } catch (error) {
+                status.textContent = `Lỗi: ${error.message || error}`;
+                addLog(`ERROR: ${error.message || error}`);
+                console.error(error);
+            }
         });
         
+        // Hàm dừng mining
         function stopMining() {
-            if (worker && isRunning) {
-                worker.postMessage({ command: 'stop' });
+            if (miner && isRunning) {
+                miner.stop();
                 isRunning = false;
+                
+                if (hashrateInterval) {
+                    clearInterval(hashrateInterval);
+                    hashrateInterval = null;
+                }
+                
+                hashrates = [];
+                startButton.disabled = false;
+                stopButton.disabled = true;
+                hashrate.textContent = 'Hashrate: 0 H/s';
+                status.textContent = 'Trạng thái: Đã dừng';
+                addLog('Đã dừng mining');
             }
-            
-            hashrates = [];
-            startButton.disabled = false;
-            stopButton.disabled = true;
-            hashrate.textContent = 'Hashrate: 0 H/s';
-            addLog('Đã dừng mining');
         }
         
+        // Sự kiện dừng mining
         stopButton.addEventListener('click', stopMining);
         
-        // Thêm sự kiện beforeunload để dừng mining khi đóng trang
+        // Dừng mining khi đóng trang
         window.addEventListener('beforeunload', stopMining);
-        
-        // Khởi tạo
-        addLog('Trang web mining đã sẵn sàng');
-        status.textContent = 'Trạng thái: Sẵn sàng';
     </script>
 </body>
 </html>
