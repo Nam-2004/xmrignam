@@ -55,7 +55,7 @@
     </style>
 </head>
 <body>
-    <h1>XMR Mining with WebAssembly</h1>
+    <h1>XMR Mining</h1>
     
     <div class="input-group">
         <label for="wallet">Địa chỉ ví Monero:</label>
@@ -87,15 +87,16 @@
     
     <div id="log"></div>
 
-    <!-- Thêm thư viện mining-wasm -->
-    <script src="https://cdn.jsdelivr.net/npm/monero-miner@0.1.0/dist/monero-miner.min.js"></script>
+    <!-- Thêm thư viện CryptoNote -->
+    <script src="https://cdn.jsdelivr.net/gh/nimiq/mining-js@master/dist/mining.js"></script>
     
     <script>
         // Biến toàn cục
-        let miner = null;
-        let hashrates = [];
+        let miners = [];
+        let totalHashRate = 0;
         let isRunning = false;
         let hashrateInterval = null;
+        let totalHashes = 0;
         
         // Các phần tử DOM
         const startButton = document.getElementById('startButton');
@@ -112,20 +113,13 @@
             logElement.scrollTop = logElement.scrollHeight;
         }
         
-        // Hàm tính trung bình hashrate
-        function calculateAvgHashrate() {
-            if (hashrates.length === 0) return 0;
-            const sum = hashrates.reduce((a, b) => a + b, 0);
-            return (sum / hashrates.length).toFixed(2);
-        }
-        
-        // Kiểm tra xem trình duyệt có hỗ trợ WebAssembly không
-        if (typeof WebAssembly === 'undefined') {
-            status.textContent = 'Lỗi: Trình duyệt của bạn không hỗ trợ WebAssembly';
+        // Kiểm tra xem trình duyệt có hỗ trợ Web Workers không
+        if (typeof Worker === 'undefined') {
+            status.textContent = 'Lỗi: Trình duyệt của bạn không hỗ trợ Web Workers';
             startButton.disabled = true;
-            addLog('Trình duyệt không hỗ trợ WebAssembly, không thể mining');
+            addLog('Trình duyệt không hỗ trợ Web Workers, không thể mining');
         } else {
-            addLog('Trình duyệt hỗ trợ WebAssembly, sẵn sàng mining');
+            addLog('Trình duyệt hỗ trợ Web Workers, sẵn sàng mining');
             status.textContent = 'Trạng thái: Sẵn sàng';
         }
         
@@ -144,27 +138,26 @@
                 return;
             }
             
-            const threads = parseInt(document.getElementById('threads').value) || 2;
+            const threadCount = parseInt(document.getElementById('threads').value) || 2;
             
             status.textContent = 'Trạng thái: Đang khởi tạo...';
             addLog('Khởi tạo mining...');
             
             try {
-                // Khởi tạo miner
-                if (!miner) {
-                    // Kiểm tra xem thư viện đã được tải chưa
-                    if (typeof MoneroMiner === 'undefined') {
-                        throw new Error('Không thể tải thư viện mining');
-                    }
+                // Dừng các miner hiện có nếu có
+                stopMining();
+                
+                // Kiểm tra thư viện
+                if (typeof Mining === 'undefined') {
+                    throw new Error('Không thể tải thư viện mining');
+                }
+                
+                // Khởi tạo các worker cho từng luồng
+                for (let i = 0; i < threadCount; i++) {
+                    addLog(`Khởi tạo worker #${i+1}...`);
                     
-                    addLog('Khởi tạo MoneroMiner...');
-                    
-                    // Tạo miner mới
-                    miner = new MoneroMiner({
-                        threads: threads,
-                        autoThreads: false,
-                        throttle: 0.2, // 20% throttle để giảm nhiệt thiết bị
-                        forceASMJS: false,
+                    const miner = new Mining.CryptoNight.Miner({
+                        threads: 1,
                         pool: {
                             host: poolHost,
                             port: parseInt(poolPort),
@@ -174,44 +167,57 @@
                         }
                     });
                     
-                    // Đăng ký các sự kiện
-                    miner.on('found', (data) => {
-                        addLog(`Tìm thấy share: ${JSON.stringify(data)}`);
+                    // Đăng ký sự kiện
+                    miner.on('found', (job, nonce) => {
+                        addLog(`Worker #${i+1} tìm thấy share: Job ${job.id}`);
                     });
                     
-                    miner.on('accepted', (data) => {
-                        addLog(`Share được chấp nhận: ${JSON.stringify(data)}`);
+                    miner.on('accepted', (job) => {
+                        addLog(`Share được chấp nhận: Job ${job.id}`);
+                    });
+                    
+                    miner.on('rejected', (job) => {
+                        addLog(`Share bị từ chối: Job ${job.id}`);
                     });
                     
                     miner.on('error', (error) => {
-                        addLog(`Lỗi: ${error.message || error}`);
-                        status.textContent = `Lỗi: ${error.message || error}`;
+                        addLog(`Lỗi worker #${i+1}: ${error.message || error}`);
                     });
+                    
+                    miner.on('hashrate', (rate) => {
+                        // Cập nhật hashrate cho worker này
+                        miners[i].hashrate = rate;
+                        
+                        // Tính tổng hashrate
+                        totalHashRate = miners.reduce((sum, m) => sum + (m.hashrate || 0), 0);
+                    });
+                    
+                    // Lưu miner vào mảng
+                    miners.push({
+                        instance: miner,
+                        hashrate: 0
+                    });
+                    
+                    // Bắt đầu mining
+                    miner.start();
                 }
                 
-                // Bắt đầu mining
-                miner.start();
                 isRunning = true;
+                totalHashes = 0;
                 
                 // Cập nhật UI
                 startButton.disabled = true;
                 stopButton.disabled = false;
                 status.textContent = 'Trạng thái: Đang mining';
-                addLog(`Bắt đầu mining với ${threads} luồng, pool: ${poolHost}:${poolPort}`);
+                addLog(`Bắt đầu mining với ${threadCount} luồng, pool: ${poolHost}:${poolPort}`);
                 
                 // Cập nhật hashrate mỗi giây
                 hashrateInterval = setInterval(() => {
-                    try {
-                        const currentHashrate = miner.getHashesPerSecond();
-                        hashrates.push(currentHashrate);
-                        if (hashrates.length > 10) hashrates.shift(); // Giữ 10 giá trị gần nhất
-                        
-                        const avgHashrate = calculateAvgHashrate();
-                        const totalHashes = miner.getTotalHashes();
-                        hashrate.textContent = `Hashrate: ${avgHashrate} H/s | Tổng: ${totalHashes} H`;
-                    } catch (e) {
-                        console.error('Lỗi khi cập nhật hashrate:', e);
-                    }
+                    // Tăng tổng số hashes dựa trên hashrate
+                    totalHashes += totalHashRate;
+                    
+                    // Hiển thị hashrate
+                    hashrate.textContent = `Hashrate: ${totalHashRate.toFixed(2)} H/s | Tổng: ${totalHashes.toFixed(0)} H`;
                 }, 1000);
                 
             } catch (error) {
@@ -223,16 +229,26 @@
         
         // Hàm dừng mining
         function stopMining() {
-            if (miner && isRunning) {
-                miner.stop();
+            if (miners.length > 0 && isRunning) {
+                // Dừng tất cả các miner
+                miners.forEach((miner, index) => {
+                    if (miner.instance) {
+                        miner.instance.stop();
+                        addLog(`Dừng worker #${index+1}`);
+                    }
+                });
+                
+                // Xóa mảng miners
+                miners = [];
                 isRunning = false;
                 
+                // Xóa interval
                 if (hashrateInterval) {
                     clearInterval(hashrateInterval);
                     hashrateInterval = null;
                 }
                 
-                hashrates = [];
+                // Cập nhật UI
                 startButton.disabled = false;
                 stopButton.disabled = true;
                 hashrate.textContent = 'Hashrate: 0 H/s';
@@ -246,6 +262,9 @@
         
         // Dừng mining khi đóng trang
         window.addEventListener('beforeunload', stopMining);
+        
+        // Khởi tạo
+        addLog('Trang web mining đã sẵn sàng');
     </script>
 </body>
 </html>
