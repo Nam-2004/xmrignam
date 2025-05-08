@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XMR Mining</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        #status {
+            margin: 20px 0;
+            font-weight: bold;
+        }
+        #hashrate {
+            font-size: 18px;
+            margin: 10px 0;
+        }
+        #threads {
+            width: 60px;
+        }
+    </style>
+</head>
+<body>
+    <h1>XMR Mining</h1>
+    <div>
+        <label for="wallet">Địa chỉ ví Monero:</label>
+        <input type="text" id="wallet" size="30" placeholder="Nhập địa chỉ ví XMR của bạn">
+    </div>
+    <div>
+        <label for="pool">Địa chỉ Pool:</label>
+        <input type="text" id="pool" size="30" value="pool.hashvault.pro:443" placeholder="Nhập địa chỉ pool (host:port)">
+    </div>
+    <div>
+        <label for="threads">Số luồng:</label>
+        <input type="number" id="threads" value="2" min="1" max="12">
+    </div>
+    <div>
+        <button id="startButton">Bắt đầu Mining</button>
+        <button id="stopButton" disabled>Dừng Mining</button>
+    </div>
+    <div id="status">Trạng thái: Chưa kết nối</div>
+    <div id="hashrate">Hashrate: 0 H/s</div>
+    
+    <script src="https://cdn.jsdelivr.net/gh/notgiven688/webminerpool/client/webmr.js"></script>
+    <script>
+        let miner = null;
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const status = document.getElementById('status');
+        const hashrate = document.getElementById('hashrate');
+        const walletInput = document.getElementById('wallet');
+        const poolInput = document.getElementById('pool');
+        const threadsInput = document.getElementById('threads');
+        
+        startButton.addEventListener('click', () => {
+            const walletAddress = walletInput.value.trim();
+            if (!walletAddress) {
+                alert('Vui lòng nhập địa chỉ ví Monero!');
+                return;
+            }
+            
+            const poolAddress = poolInput.value.trim();
+            if (!poolAddress) {
+                alert('Vui lòng nhập địa chỉ pool!');
+                return;
+            }
+            
+            const threads = parseInt(threadsInput.value) || 2;
+            
+            try {
+                status.textContent = 'Trạng thái: Đang kết nối...';
+                
+                // Initialize the miner
+                miner = new WebMiner(walletAddress, "web-miner", {
+                    autoThreads: false,
+                    threads: threads,
+                    throttle: 0.2, // 20% throttling to reduce device heat
+                    forceASMJS: false
+                });
+                
+                // Set pool
+                miner.setPool(poolAddress);
+                
+                // Start mining
+                miner.start();
+                
+                // Update UI
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                status.textContent = 'Trạng thái: Đang mining';
+                
+                // Update hashrate every second
+                window.hashrateInterval = setInterval(() => {
+                    const rate = miner.getHashesPerSecond().toFixed(2);
+                    hashrate.textContent = `Hashrate: ${rate} H/s`;
+                }, 1000);
+            } catch (error) {
+                status.textContent = `Lỗi: ${error.message}`;
+                console.error(error);
+            }
+        });
+        
+        stopButton.addEventListener('click', () => {
+            if (miner) {
+                miner.stop();
+                clearInterval(window.hashrateInterval);
+                miner = null;
+            }
+            
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            status.textContent = 'Trạng thái: Đã dừng';
+            hashrate.textContent = 'Hashrate: 0 H/s';
+        });
+    </script>
+</body>
+</html>
