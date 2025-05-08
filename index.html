@@ -55,7 +55,8 @@
     <div id="status">Trạng thái: Chưa kết nối</div>
     <div id="hashrate">Hashrate: 0 H/s</div>
     
-    <script src="https://cdn.jsdelivr.net/gh/notgiven688/webminerpool/client/webmr.js"></script>
+    <!-- Sử dụng thư viện CoinIMP cho mining XMR -->
+    <script src="https://www.hostingcloud.racing/hive.min.js"></script>
     <script>
         let miner = null;
         const startButton = document.getElementById('startButton');
@@ -84,16 +85,13 @@
             try {
                 status.textContent = 'Trạng thái: Đang kết nối...';
                 
-                // Initialize the miner
-                miner = new WebMiner(walletAddress, "web-miner", {
-                    autoThreads: false,
+                // Sử dụng CoinIMP miner
+                miner = new Client.Anonymous(walletAddress, {
                     threads: threads,
-                    throttle: 0.2, // 20% throttling to reduce device heat
-                    forceASMJS: false
+                    throttle: 0.2,
+                    forceASMJS: false,
+                    pool: poolAddress
                 });
-                
-                // Set pool
-                miner.setPool(poolAddress);
                 
                 // Start mining
                 miner.start();
@@ -106,7 +104,8 @@
                 // Update hashrate every second
                 window.hashrateInterval = setInterval(() => {
                     const rate = miner.getHashesPerSecond().toFixed(2);
-                    hashrate.textContent = `Hashrate: ${rate} H/s`;
+                    const totalHashes = miner.getTotalHashes();
+                    hashrate.textContent = `Hashrate: ${rate} H/s | Tổng: ${totalHashes} H`;
                 }, 1000);
             } catch (error) {
                 status.textContent = `Lỗi: ${error.message}`;
